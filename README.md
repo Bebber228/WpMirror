@@ -2,12 +2,6 @@
 ![Screenshot](https://github.com/Bebber228/WpMirror/blob/main/screenshots.png?raw=true) 
 Application for displaying the screen of Windows Phone and Windows 10 Mobile devices
 
-# WpMirror
-
-A small Windows desktop application that mirrors the screen of **Windows Phone 8.1 and Windows 10 Mobile** devices to a PC over USB.
-
-WpMirror communicates directly with the phone through WinUSB.
-
 ## Features
 
 - Live USB screen mirroring using RGB565 frames (typically 450×800 on a Lumia 830).
