@@ -103,6 +103,58 @@ namespace WpMirror
 
         [DllImport("winusb.dll", SetLastError = true)]
         public static extern bool WinUsb_QueryPipe(IntPtr iface, byte alt, byte index, out WINUSB_PIPE_INFORMATION info);
+
+        // ---- asynchronous (overlapped) reading ----
+        [DllImport("winusb.dll", SetLastError = true, EntryPoint = "WinUsb_ReadPipe")]
+        public static extern bool WinUsb_ReadPipeAsync(IntPtr iface, byte pipe, IntPtr buf, uint len, IntPtr read, IntPtr ov);
+
+        [DllImport("winusb.dll", SetLastError = true)]
+        public static extern bool WinUsb_GetOverlappedResult(IntPtr iface, IntPtr ov, out uint transferred, bool wait);
+
+        [DllImport("winusb.dll", SetLastError = true, EntryPoint = "WinUsb_SetPipePolicy")]
+        public static extern bool WinUsb_SetPipePolicyByte(IntPtr iface, byte pipe, uint policy, uint valueLen, ref byte value);
+
+        [DllImport("winusb.dll", SetLastError = true)]
+        public static extern bool WinUsb_GetPipePolicy(IntPtr iface, byte pipe, uint policy, ref uint valueLen, out uint value);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr CreateEvent(IntPtr sec, bool manualReset, bool initialState, IntPtr name);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool ResetEvent(IntPtr h);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern uint WaitForSingleObject(IntPtr h, uint ms);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CloseHandle(IntPtr h);
+
+        // ---- fast drawing (GDI) ----
+        [StructLayout(LayoutKind.Sequential)]
+        public struct BITMAPINFOHEADER
+        {
+            public int biSize;
+            public int biWidth;
+            public int biHeight;
+            public short biPlanes;
+            public short biBitCount;
+            public int biCompression;
+            public int biSizeImage;
+            public int biXPelsPerMeter;
+            public int biYPelsPerMeter;
+            public int biClrUsed;
+            public int biClrImportant;
+        }
+
+        [DllImport("gdi32.dll")]
+        public static extern int StretchDIBits(IntPtr hdc, int xDest, int yDest, int wDest, int hDest,
+            int xSrc, int ySrc, int wSrc, int hSrc, int[] bits, ref BITMAPINFOHEADER bmi, uint usage, uint rop);
+
+        [DllImport("gdi32.dll")]
+        public static extern int SetStretchBltMode(IntPtr hdc, int mode);
+
+        [DllImport("gdi32.dll")]
+        public static extern bool SetBrushOrgEx(IntPtr hdc, int x, int y, IntPtr prev);
     }
 
     internal sealed class DeviceInfo
@@ -135,6 +187,7 @@ namespace WpMirror
         public byte PipeIn = 0x84;
         public byte PipeOut = 0x03;
         public int InterfaceNumber = DisplayInterface;
+        public int InPacketSize = 512;
 
         public bool IsOpen { get { return Iface != IntPtr.Zero; } }
 
@@ -189,7 +242,12 @@ namespace WpMirror
                 if (pi.PipeType != 2) continue; // 2 = bulk
                 if ((pi.PipeId & 0x80) != 0)
                 {
-                    if (!haveIn) { PipeIn = pi.PipeId; haveIn = true; }
+                    if (!haveIn)
+                    {
+                        PipeIn = pi.PipeId;
+                        if (pi.MaximumPacketSize > 0) InPacketSize = pi.MaximumPacketSize;
+                        haveIn = true;
+                    }
                 }
                 else if (!haveOut) { PipeOut = pi.PipeId; haveOut = true; }
             }
@@ -216,6 +274,30 @@ namespace WpMirror
         public void SetTimeout(byte pipe, uint ms)
         {
             Native.WinUsb_SetPipePolicy(Iface, pipe, 3, 4, ref ms);
+        }
+
+        // Prepares the IN pipe for several queued reads. Returns the size of one read request.
+        // RAW_IO sends the requests straight to the USB stack, so there is no gap between two transfers.
+        public int ConfigureIn(bool rawIo, int wanted, out bool rawOk)
+        {
+            rawOk = false;
+            uint zero = 0;
+            Native.WinUsb_SetPipePolicy(Iface, PipeIn, 3, 4, ref zero); // no timeout: the program waits itself
+            int mps = InPacketSize > 0 ? InPacketSize : 512;
+            int size = wanted;
+            if (rawIo)
+            {
+                uint len = 4, max;
+                if (Native.WinUsb_GetPipePolicy(Iface, PipeIn, 8, ref len, out max) && max >= (uint)mps)
+                {
+                    if ((uint)size > max) size = (int)max;
+                    byte one = 1;
+                    rawOk = Native.WinUsb_SetPipePolicyByte(Iface, PipeIn, 7, 1, ref one);
+                }
+            }
+            size -= size % mps;          // RAW_IO needs a multiple of the packet size
+            if (size < mps) size = mps;
+            return size;
         }
 
         // Cancels any transfer that is still pending, so the interface is released cleanly.
